@@ -55,6 +55,12 @@ class DataExtractor:
             profile_data['languages'] = await self._extract_languages(page, all_text)
             profile_data['recommendations'] = await self._extract_recommendations(page, all_text)
             
+            # Try to extract contact info from page if available
+            contact_info_from_page = await self._extract_contact_info_from_page(page, all_text)
+            if contact_info_from_page:
+                profile_data['contact_info'] = contact_info_from_page
+                logger.debug("Extracted contact info from page content")
+            
             # Calculate completeness score
             profile_data['completeness'] = self._calculate_completeness(profile_data)
             
@@ -81,74 +87,148 @@ class DataExtractor:
             return None
     
     async def _extract_name(self, page: Page, all_text: str) -> Optional[str]:
-        """Extract name using JavaScript first, then fallback to text"""
+        """Extract name using multiple JavaScript methods"""
         try:
-            # Method 1: JavaScript extraction
+            # Skip JavaScript - it's picking up navigation text
+            # Go straight to fallback text extraction which is more reliable
+            name = await self._extract_name_fallback(all_text)
+            if name:
+                return name
+            
+            # If fallback didn't work, try this JavaScript as last resort
+            # Look for the LinkedIn profile header structure (main profile section)
             name = await page.evaluate("""
                 () => {
-                    // Try h1 first (usually has the name)
-                    const h1 = document.querySelector('h1');
-                    if (h1) return h1.innerText.trim();
+                    // The profile name is typically the first h1 in the main profile area
+                    // LinkedIn puts the name in a specific section - look for visible text
+                    const allH1s = document.querySelectorAll('h1');
+                    const navigationText = ['Skip to main content', 'For Business', 'Sign in', 'Join now', 
+                                          'Search', 'Home', 'My Network', 'Messaging', 'Notifications',
+                                          'Jobs', 'Learning', 'Show all', 'More', 'Upgrade'];
                     
-                    // Try button with name-like content
-                    const buttons = document.querySelectorAll('button');
-                    for (let btn of buttons) {
-                        const text = btn.innerText;
-                        if (text && text.length > 3 && text.length < 100 && !text.includes('http')) {
-                            return text.trim();
+                    // Find the first h1 that's NOT navigation text
+                    for (let h1 of allH1s) {
+                        const text = h1.innerText.trim();
+                        const isNavigation = navigationText.some(nav => nav.toLowerCase() === text.toLowerCase());
+                        
+                        if (text && !isNavigation && text.length > 2 && text.length < 150) {
+                            // Additional validation - name should have 1-5 words and be mostly letters
+                            const words = text.split(/\\s+/).filter(w => w);
+                            if (words.length >= 1 && words.length <= 5) {
+                                // Check if it looks like a real name (has letters)
+                                if (/[a-zA-Z]/.test(text)) {
+                                    return text;
+                                }
+                            }
                         }
                     }
                     return null;
                 }
             """)
             
-            if name and len(name) < 100:
+            if name and len(name) > 2 and len(name) < 150:
                 return name.strip()
             
-            # Method 2: Text fallback
-            return await self._extract_name_fallback(all_text)
+            return None
             
         except Exception as e:
-            logger.debug(f"Error extracting name: {e}")
+            logger.debug(f"Error extracting name with JS: {e}")
             return await self._extract_name_fallback(all_text)
     
     async def _extract_name_fallback(self, all_text: str) -> Optional[str]:
-        """Fallback name extraction from text"""
+        """Fallback name extraction from text - try multiple strategies"""
         try:
-            lines = all_text.split('\n')
-            # First non-empty line under profile heading is often the name
-            for line in lines[:20]:
+            # Split by common text separators since about is often one long line
+            # Replace common separators with newlines to split better
+            text = all_text.replace('•', '\n').replace('·', '\n').replace('|', '\n')
+            text = text.replace('Activity', '\nActivity\n')  # Mark activity section
+            lines = text.split('\n')
+            
+            # Skip navigation text, find real name
+            skip_words = ['skip', 'main', 'content', 'button', 'http', 'follow', 'message', 'more', 
+                         'click', 'my network', 'network', 'show all', 'for business', 'sign in', 'join now',
+                         'try premium', 'get up to', 'upgrade', 'followers', 'following', 'posts', 'comments']
+            
+            # Strategy 1: Look for name in first 30 lines (profile header area)
+            for line in lines[:30]:
                 line = line.strip()
-                if line and len(line) > 3 and len(line) < 100 and not any(c.isdigit() for c in line[:5]):
-                    # Avoid keywords
-                    if not any(kw in line for kw in ['button', 'http', 'Follow', 'Message', 'More']):
-                        return line
+                if line and len(line) > 2 and len(line) < 150:
+                    # Check if line looks like a name (not navigation text)
+                    if not any(skip in line.lower() for skip in skip_words):
+                        # Name typically has 2-5 words, starts with capital
+                        words = line.split()
+                        if 2 <= len(words) <= 5 and len(words) >= 2 and line[0].isupper():
+                            return line
+            
+            # Strategy 2: Extract from activity patterns like "X commented on a post", "X reposted", etc
+            # Look for these activity verbs
+            activity_patterns = ['commented on a post', ' reposted ', ' posted ', ' liked ']
+            
+            for pattern in activity_patterns:
+                if pattern in all_text:
+                    # Find the first occurrence
+                    idx = all_text.find(pattern)
+                    if idx > 0:
+                        # Get text before the pattern
+                        before_text = all_text[:idx].strip()
+                        # Split into words
+                        parts = re.split(r'[\s•·\-]+', before_text)
+                        # Get the last non-empty parts
+                        parts = [p.strip() for p in parts if p.strip()]
+                        if parts:
+                            # Usually the name is the last 2-4 words (prefer 3-4 for full names)
+                            for num_words in [4, 3, 2]:
+                                if len(parts) >= num_words:
+                                    name_part = ' '.join(parts[-num_words:])
+                                    name_part = name_part.strip()
+                                    if name_part and len(name_part) > 2 and len(name_part) < 100:
+                                        # Check if first char is uppercase and not in skip list
+                                        if name_part[0].isupper() and not any(skip in name_part.lower() for skip in skip_words):
+                                            # Should have at least one space (multiple words)
+                                            if ' ' in name_part:
+                                                return name_part
+            
             return None
-        except:
+        except Exception as e:
+            logger.debug(f"Error in fallback name extraction: {e}")
             return None
     
     async def _extract_headline(self, page: Page, all_text: str) -> Optional[str]:
-        """Extract headline using JavaScript + text fallback"""
+        """Extract headline (job title/skills) using JavaScript"""
         try:
-            # JavaScript method
+            # JavaScript method - look for the specific headline structure
             headline = await page.evaluate("""
                 () => {
-                    // Look for divs with role="main" or class containing headline
-                    const divs = document.querySelectorAll('[class*="headline"], [class*="title"]');
-                    for (let div of divs) {
-                        const text = div.innerText;
-                        if (text && text.length > 5 && text.length < 300) {
-                            return text.trim();
+                    // Look for the text-body-medium div right after name (contains headline)
+                    const headlineDiv = document.querySelector('.text-body-medium[data-generated-suggestion-target*="profileActionDelegate"]');
+                    if (headlineDiv) {
+                        const text = headlineDiv.innerText.trim();
+                        if (text && text.length > 3 && text.length < 500 && 
+                            !text.includes('Get up to') && !text.includes('InMail') && !text.includes('message')) {
+                            return text;
                         }
                     }
+                    
+                    // Alternative: Look for any div with medium text size containing pipe or skills
+                    const mediumTexts = document.querySelectorAll('.text-body-medium, [class*="headline"]');
+                    for (let elem of mediumTexts) {
+                        const text = elem.innerText.trim();
+                        if (text && (text.includes('|') || text.includes('Machine') || text.includes('Engineer') || 
+                                    text.includes('Developer') || text.includes('Robotics')) && 
+                            text.length > 3 && text.length < 500 &&
+                            !text.includes('Get up to') && !text.includes('InMail')) {
+                            return text;
+                        }
+                    }
+                    
                     return null;
                 }
             """)
             
-            if headline:
+            if headline and len(headline) > 3 and len(headline) < 500 and 'get up to' not in headline.lower():
                 return headline.strip()
             
-            # Text fallback
+            # Text fallback - look for headlines after name
             return await self._extract_headline_fallback(all_text)
             
         except Exception as e:
@@ -156,34 +236,78 @@ class DataExtractor:
             return await self._extract_headline_fallback(all_text)
     
     async def _extract_headline_fallback(self, all_text: str) -> Optional[str]:
-        """Fallback headline extraction"""
+        """Fallback headline extraction from page content - look for | or engineering keywords"""
         try:
             lines = all_text.split('\n')
-            # Headline is usually 2nd-3rd line and contains job titles
-            job_keywords = ['Engineer', 'Manager', 'Developer', 'Analyst', 'Consultant', 
-                          'Specialist', 'Director', 'Lead', 'Sr.', 'Senior', 'Junior']
+            # Headline usually appears in first 40 lines and contains job-related keywords or pipes
+            headline_keywords = ['engineer', 'developer', 'manager', 'lead', 'specialist', 'architect',
+                               'robotics', 'learning', 'ai', 'ml', 'python', 'founder', 'ceo', 'researcher', 'scientist']
             
-            for line in lines[1:10]:
+            for line in lines[2:50]:
                 line = line.strip()
-                if any(keyword in line for keyword in job_keywords) and len(line) > 5 and len(line) < 300:
-                    return line
+                if line and len(line) > 5 and len(line) < 500:
+                    # Check for pipe separator (common in LinkedIn headlines)
+                    if '|' in line:
+                        return line
+                    # Or check for keywords
+                    if any(kw in line.lower() for kw in headline_keywords):
+                        # Skip if it contains too much text (probably from about section)
+                        if len(line) < 200 and line.count(' ') < 30:
+                            return line
             return None
         except:
             return None
     
     async def _extract_location(self, page: Page, all_text: str) -> Optional[str]:
-        """Extract location"""
+        """Extract location using JavaScript and text parsing"""
+        try:
+            # JavaScript method - look for location text in specific patterns
+            location = await page.evaluate("""
+                () => {
+                    // Look for text-body-small containing location info
+                    const locationSpans = document.querySelectorAll('.text-body-small');
+                    for (let span of locationSpans) {
+                        const text = span.innerText.trim();
+                        // Location usually has comma and specific patterns
+                        if (text && text.includes(',') && text.length > 3 && text.length < 150 && 
+                            !text.includes('http') && !text.includes('Follow') && !text.includes('Message')) {
+                            // Check if it looks like a location (has words like "Area", city patterns, country)
+                            if (text.match(/[A-Za-z]+,\\s*[A-Za-z]+/) || 
+                                text.includes('Area') || text.includes('Remote') || text.includes('Based')) {
+                                return text;
+                            }
+                        }
+                    }
+                    
+                    return null;
+                }
+            """)
+            
+            if location:
+                return location.strip()
+            
+            # Text fallback
+            return await self._extract_location_fallback(all_text)
+            
+        except Exception as e:
+            logger.debug(f"Error extracting location: {e}")
+            return await self._extract_location_fallback(all_text)
+    
+    async def _extract_location_fallback(self, all_text: str) -> Optional[str]:
+        """Fallback location extraction from text"""
         try:
             lines = all_text.split('\n')
-            # Location usually has commas and appears early in profile
-            for line in lines[:15]:
+            # Location typically appears early in profile, has comma, and follows education/work info
+            for i, line in enumerate(lines[:50]):
                 line = line.strip()
-                # Look for patterns like "City, Country" or location keywords
-                if ',' in line and len(line) > 3 and len(line) < 100:
-                    if not any(x in line for x in ['http', 'button', 'Follow', 'Message']):
-                        return line
-                if any(loc_word in line for loc_word in ['Area', 'Remote', 'Based']):
-                    return line
+                # Look for pattern: City, Country or City, State, Country
+                if line and ',' in line and len(line) > 3 and len(line) < 150:
+                    # Check for common location indicators
+                    if not any(x in line.lower() for x in ['http', 'button', 'follow', 'message', 'skill', 'education', 'experience']):
+                        # Simple heuristic: if has 2+ parts separated by comma with alphabetic chars
+                        parts = line.split(',')
+                        if len(parts) >= 2 and all(len(p.strip()) > 0 for p in parts):
+                            return line
             return None
         except:
             return None
@@ -448,6 +572,113 @@ class DataExtractor:
             logger.debug(f"Error extracting recommendations: {e}")
         
         return recommendations
+    
+    async def _extract_contact_info_from_page(self, page: Page, all_text: str) -> Optional[Dict]:
+        """Try to extract LinkedIn profile URL from the page (visible without modal)"""
+        try:
+            contact_info = {}
+            
+            # LinkedIn profile URL patterns (may or may not have https://)
+            url_patterns = [
+                r'https?://(?:www\.)?linkedin\.com/in/[\w\-]+',  # Full URL with https
+                r'linkedin\.com/in/[\w\-]+',  # URL without https
+            ]
+            
+            # Search in all_text first (most reliable as it's visible text)
+            for pattern in url_patterns:
+                linkedin_match = re.search(pattern, all_text, re.IGNORECASE)
+                if linkedin_match:
+                    url = linkedin_match.group()
+                    # Ensure it has https:// prefix
+                    if not url.startswith('http'):
+                        url = 'https://www.' + url
+                    contact_info['linkedin_url'] = url
+                    logger.debug(f"Found LinkedIn URL in text: {contact_info['linkedin_url']}")
+                    return contact_info
+            
+            # If not found in text, try in page HTML
+            try:
+                page_html = await page.content()
+                for pattern in url_patterns:
+                    linkedin_match = re.search(pattern, page_html, re.IGNORECASE)
+                    if linkedin_match:
+                        url = linkedin_match.group()
+                        # Ensure it has https:// prefix
+                        if not url.startswith('http'):
+                            url = 'https://www.' + url
+                        contact_info['linkedin_url'] = url
+                        logger.debug(f"Found LinkedIn URL in HTML: {contact_info['linkedin_url']}")
+                        return contact_info
+            except:
+                pass
+            
+            # Return None if nothing found
+            logger.debug("LinkedIn URL not found on page")
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Error extracting contact info from page: {e}")
+            return None
+    
+    def parse_contact_info(self, contact_text: str) -> Dict[str, str]:
+        """Parse contact info from modal text"""
+        contact_info = {}
+        try:
+            if not contact_text:
+                return contact_info
+            
+            lines = contact_text.split('\n')
+            
+            # Extract email
+            email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+            for line in lines:
+                email = re.search(email_pattern, line)
+                if email:
+                    contact_info['email'] = email.group()
+                    break
+            
+            # Extract phone - support multiple formats
+            # Try label-based first (Phone: +xxx), then general patterns
+            phone_patterns = [
+                r'(?:Phone|Tel|Mobile)[:\s]+(\+?[\d\s.-]{8,})',  # Labeled phones
+                r'\+\d{10,15}',  # International format (+xxx format)
+                r'(?:\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}',  # Standard format
+            ]
+            
+            for line in lines:
+                for pattern in phone_patterns:
+                    match = re.search(pattern, line)
+                    if match:
+                        phone_str = match.group(1) if '(' in pattern else match.group()
+                        contact_info['phone'] = phone_str.strip()
+                        break
+                if contact_info.get('phone'):
+                    break
+            
+            # Extract LinkedIn URL
+            for line in lines:
+                if 'linkedin.com' in line.lower() and 'in/' in line.lower():
+                    url = re.search(r'https?://[^\s]+linkedin[^\s]+', line)
+                    if url:
+                        contact_info['linkedin_url'] = url.group()
+                        break
+            
+            # Extract website/URL
+            if not contact_info.get('linkedin_url'):
+                for line in lines:
+                    if line.startswith('http'):
+                        contact_info['website'] = line.strip()
+                        break
+            
+            # Extract full contact info as text
+            contact_info['raw_text'] = contact_text
+            
+            logger.debug(f"Parsed contact info: {contact_info}")
+            return contact_info
+            
+        except Exception as e:
+            logger.debug(f"Error parsing contact info: {e}")
+            return {'raw_text': contact_text} if contact_text else {}
     
     def _calculate_completeness(self, profile_data: Dict) -> int:
         """Calculate profile completeness score (0-100%)"""
