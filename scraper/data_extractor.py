@@ -21,6 +21,7 @@ class DataExtractor:
     
     def __init__(self):
         self.extracted_data = {}
+        self.scrape_agent = None  # Will be set by scrape_agent when needed
     
     async def extract_complete_profile(self, page: Page, profile_url: str) -> Optional[Dict]:
         """Extract complete profile using JavaScript evaluation"""
@@ -46,6 +47,13 @@ class DataExtractor:
             profile_data['location'] = await self._extract_location(page, all_text)
             profile_data['about'] = await self._extract_about(page, all_text)
             
+            # Extract contact info (if scrape_agent is available)
+            if self.scrape_agent:
+                contact_info = await self.scrape_agent._extract_contact_info()
+                if contact_info:
+                    profile_data['contact_info'] = contact_info
+                    logger.debug("Extracted contact info via scrape_agent")
+            
             # Extract sections using text parsing
             profile_data['experience'] = await self._extract_experience(page, all_text)
             profile_data['education'] = await self._extract_education(page, all_text)
@@ -54,12 +62,6 @@ class DataExtractor:
             profile_data['projects'] = await self._extract_projects(page, all_text)
             profile_data['languages'] = await self._extract_languages(page, all_text)
             profile_data['recommendations'] = await self._extract_recommendations(page, all_text)
-            
-            # Try to extract contact info from page if available
-            contact_info_from_page = await self._extract_contact_info_from_page(page, all_text)
-            if contact_info_from_page:
-                profile_data['contact_info'] = contact_info_from_page
-                logger.debug("Extracted contact info from page content")
             
             # Calculate completeness score
             profile_data['completeness'] = self._calculate_completeness(profile_data)
@@ -620,65 +622,240 @@ class DataExtractor:
             logger.debug(f"Error extracting contact info from page: {e}")
             return None
     
-    def parse_contact_info(self, contact_text: str) -> Dict[str, str]:
-        """Parse contact info from modal text"""
+    def parse_contact_info(self, contact_text: str) -> Dict[str, any]:
+        """Parse comprehensive contact info from modal/overlay text - extracts ALL contact types"""
         contact_info = {}
         try:
             if not contact_text:
                 return contact_info
             
+            # Clean up the raw text by extracting only the relevant section
+            # Find the "Contact info" section and extract content between it and the next major section
             lines = contact_text.split('\n')
             
-            # Extract email
-            email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-            for line in lines:
-                email = re.search(email_pattern, line)
-                if email:
-                    contact_info['email'] = email.group()
+            # Find the contact info section
+            contact_section_start = -1
+            for i, line in enumerate(lines):
+                if 'contact info' in line.lower():
+                    contact_section_start = i
                     break
             
-            # Extract phone - support multiple formats
-            # Try label-based first (Phone: +xxx), then general patterns
-            phone_patterns = [
-                r'(?:Phone|Tel|Mobile)[:\s]+(\+?[\d\s.-]{8,})',  # Labeled phones
-                r'\+\d{10,15}',  # International format (+xxx format)
-                r'(?:\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}',  # Standard format
-            ]
-            
-            for line in lines:
-                for pattern in phone_patterns:
-                    match = re.search(pattern, line)
-                    if match:
-                        phone_str = match.group(1) if '(' in pattern else match.group()
-                        contact_info['phone'] = phone_str.strip()
+            # If we found contact section, extract content after it until we hit navigation or end
+            if contact_section_start >= 0:
+                contact_lines = []
+                for i in range(contact_section_start + 1, len(lines)):
+                    line = lines[i]
+                    # Stop at common section markers
+                    if any(marker in line.lower() for marker in ['about', 'experience', 'education', 'skills', 'recommendations', 'causes']):
                         break
-                if contact_info.get('phone'):
-                    break
+                    # Add non-empty lines
+                    if line.strip() and len(line.strip()) > 1:
+                        contact_lines.append(line.strip())
+                
+                # Reconstruct cleaned contact text
+                if contact_lines:
+                    contact_text = '\n'.join(contact_lines)
             
-            # Extract LinkedIn URL
-            for line in lines:
-                if 'linkedin.com' in line.lower() and 'in/' in line.lower():
-                    url = re.search(r'https?://[^\s]+linkedin[^\s]+', line)
-                    if url:
-                        contact_info['linkedin_url'] = url.group()
-                        break
-            
-            # Extract website/URL
-            if not contact_info.get('linkedin_url'):
-                for line in lines:
-                    if line.startswith('http'):
-                        contact_info['website'] = line.strip()
-                        break
-            
-            # Extract full contact info as text
+            # Store raw text for reference (cleaned version)
             contact_info['raw_text'] = contact_text
             
-            logger.debug(f"Parsed contact info: {contact_info}")
+            # ========== EMAIL EXTRACTION ==========
+            email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+            emails = re.findall(email_pattern, contact_text)
+            contact_info['emails'] = emails if emails else ['N/A']
+            
+            # ========== PHONE EXTRACTION (Multiple) ==========
+            phones = []
+            phone_patterns = [
+                r'(?:phone|tel|mobile)[:\s]+(\+?[\d\s.\-()]{8,})',  # Labeled phones
+                r'\+[\d]{1,3}[\d\s.\-()]{8,}',  # International format
+                r'(?:^|\s)[\d]{3}[-.]?[\d]{3}[-.]?[\d]{4}(?:\s|$)',  # Standard format
+                r'(?:^|\s)\([\d]{3}\)[\s]?[\d]{3}[-.][\d]{4}(?:\s|$)',  # (XXX) XXX-XXXX
+            ]
+            for pattern in phone_patterns:
+                matches = re.findall(pattern, contact_text, re.IGNORECASE | re.MULTILINE)
+                phones.extend(matches)
+            contact_info['phones'] = list(set([p.strip() for p in phones])) if phones else ['N/A']
+            
+            # ========== LINKEDIN URL EXTRACTION (Multiple) ==========
+            linkedin_urls = re.findall(
+                r'(?:https?://)?(?:www\.)?linkedin\.com/in/[\w\-]+',
+                contact_text,
+                re.IGNORECASE
+            )
+            # Also extract just the username if preceded by linkedin.com/in/
+            linkedin_usernames = re.findall(
+                r'linkedin\.com/in/([\w\-]+)',
+                contact_text,
+                re.IGNORECASE
+            )
+            
+            # Ensure https:// prefix for full URLs
+            linkedin_urls = list(set([
+                (u if u.startswith('http') else 'https://' + u) 
+                for u in linkedin_urls
+            ]))
+            
+            # Add usernames as full URLs if not already present
+            for username in linkedin_usernames:
+                full_url = f'https://linkedin.com/in/{username}'
+                if full_url not in linkedin_urls:
+                    linkedin_urls.append(full_url)
+            
+            contact_info['linkedin_urls'] = list(set(linkedin_urls)) if linkedin_urls else ['N/A']
+            
+            # ========== GITHUB EXTRACTION (Multiple) ==========
+            github_urls = re.findall(
+                r'https?://(?:www\.)?github\.com/[\w\-]+|github\.com/[\w\-]+',
+                contact_text,
+                re.IGNORECASE
+            )
+            github_urls = [
+                (u if u.startswith('http') else 'https://' + u) 
+                for u in github_urls
+            ]
+            contact_info['github_urls'] = list(set(github_urls)) if github_urls else ['N/A']
+            
+            # ========== WEBSITES EXTRACTION (Multiple) ==========
+            all_urls = re.findall(r'https?://[^\s<>"\)]+', contact_text)
+            websites = []
+            for url in all_urls:
+                # Exclude LinkedIn and GitHub URLs
+                if not any(x in url.lower() for x in ['linkedin', 'github']):
+                    # Clean up URL
+                    url = url.rstrip('.,;:\'")')
+                    if len(url) > 7:  # At least http://a.b
+                        websites.append(url)
+            
+            # Also extract domain names without http:// (like cuet.ac.bd, maksudcse.wordpress.com)
+            # More flexible pattern that captures common domain extensions
+            domain_pattern = r'\b([a-zA-Z0-9][\w\-]{0,62}(?:\.[a-zA-Z0-9][\w\-]{0,62})*\.(?:ac\.bd|com|org|net|edu|io|co|bd|wordpress\.com|github\.io|dev|app|in|us|uk|au|ca|de|fr|jp|cn|ru|in|tv|xyz|info|biz|name|me|cc))\b'
+            domains = re.findall(domain_pattern, contact_text, re.IGNORECASE | re.MULTILINE)
+            
+            # Filter out known non-website domains and duplicates
+            filtered_domains = []
+            for domain in domains:
+                domain_lower = domain.lower()
+                # Exclude common noise domains
+                if not any(x in domain_lower for x in ['linkedin', 'github', 'facebook', 'twitter', 'instagram', 'youtube', 'corp']):
+                    filtered_domains.append(domain)
+            
+            websites.extend(filtered_domains)
+            contact_info['websites'] = list(set(websites)) if websites else ['N/A']
+            
+            # ========== TWITTER EXTRACTION ==========
+            twitter_patterns = [
+                r'(?:twitter\.com/|@)(?P<handle>[\w\-]{1,15})',
+                r'https?://(?:www\.)?twitter\.com/[\w\-]+',
+            ]
+            twitter_handles = []
+            for pattern in twitter_patterns:
+                matches = re.findall(pattern, contact_text, re.IGNORECASE)
+                twitter_handles.extend(matches)
+            contact_info['twitter'] = list(set(twitter_handles)) if twitter_handles else ['N/A']
+            
+            # ========== INSTAGRAM EXTRACTION ==========
+            instagram_patterns = [
+                r'(?:instagram\.com/|instagram\s+handle\s*:\s*)(?P<handle>[\w\.]{1,30})',
+                r'instagram\s*:\s*(?P<handle>[\w\.]+)',
+            ]
+            insta_handles = []
+            for pattern in instagram_patterns:
+                matches = re.findall(pattern, contact_text, re.IGNORECASE)
+                insta_handles.extend(matches)
+            contact_info['instagram'] = list(set(insta_handles)) if insta_handles else ['N/A']
+            
+            # ========== FACEBOOK EXTRACTION ==========
+            facebook_patterns = [
+                r'(?:facebook\.com/|facebook\s+:\s*)(?P<handle>[\w\.\-]+)',
+                r'facebook\s*:\s*(?P<handle>[\w\.\-]+)',
+            ]
+            fb_handles = []
+            for pattern in facebook_patterns:
+                matches = re.findall(pattern, contact_text, re.IGNORECASE)
+                fb_handles.extend(matches)
+            contact_info['facebook'] = list(set(fb_handles)) if fb_handles else ['N/A']
+            
+            # ========== WHATSAPP EXTRACTION ==========
+            whatsapp_patterns = [
+                r'(?:whatsapp|wa\.me)[:\s/]+(\+?[\d\s.\-()]{8,})',
+                r'whatsapp\s*:\s*(\+?[\d\s.\-()]+)',
+            ]
+            whatsapp_nums = []
+            for pattern in whatsapp_patterns:
+                matches = re.findall(pattern, contact_text, re.IGNORECASE)
+                whatsapp_nums.extend(matches)
+            contact_info['whatsapp'] = list(set([w.strip() for w in whatsapp_nums])) if whatsapp_nums else ['N/A']
+            
+            # ========== TELEGRAM EXTRACTION ==========
+            telegram_patterns = [
+                r'(?:telegram|t\.me)[:\s/]+(?P<handle>[\w\-]{5,})',
+                r'telegram\s*:\s*(?P<handle>[\w\-]+)',
+            ]
+            tg_handles = []
+            for pattern in telegram_patterns:
+                matches = re.findall(pattern, contact_text, re.IGNORECASE)
+                tg_handles.extend(matches)
+            contact_info['telegram'] = list(set(tg_handles)) if tg_handles else ['N/A']
+            
+            # ========== BIRTHDAY EXTRACTION ==========
+            birthday_patterns = [
+                r'(?:birthday|born|dob|date of birth)[:\s]+([A-Za-z]+\s+\d{1,2})',  # Month Day (e.g., April 8)
+                r'\b([A-Za-z]+\s+\d{1,2})\b(?=\s|$)',  # Month Day anywhere
+                r'(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',  # DD-MM-YYYY or MM/DD/YY
+                r'([A-Za-z]+\s+\d{1,2},?\s+\d{4})',  # Month Day, Year
+            ]
+            birthdays = []
+            for pattern in birthday_patterns:
+                matches = re.findall(pattern, contact_text, re.IGNORECASE | re.MULTILINE)
+                birthdays.extend(matches)
+            
+            # Filter to valid months to avoid false positives
+            valid_months = ['january', 'february', 'march', 'april', 'may', 'june', 
+                          'july', 'august', 'september', 'october', 'november', 'december',
+                          'jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+            birthdays = [b for b in birthdays if any(month in b.lower() for month in valid_months)]
+            contact_info['birthday'] = list(set([b.strip() for b in birthdays])) if birthdays else ['N/A']
+            
+            # ========== SKYPE EXTRACTION ==========
+            skype_patterns = [
+                r'(?:skype)[:\s]+(?P<handle>[\w\-\.]+)',
+                r'skype\s*:\s*(?P<handle>[\w\-\.]+)',
+            ]
+            skype_handles = []
+            for pattern in skype_patterns:
+                matches = re.findall(pattern, contact_text, re.IGNORECASE)
+                skype_handles.extend(matches)
+            contact_info['skype'] = list(set(skype_handles)) if skype_handles else ['N/A']
+            
+            # ========== YOUTUBE EXTRACTION ==========
+            youtube_urls = re.findall(
+                r'https?://(?:www\.)?youtube\.com/(?:channel/|c/|user/)?[\w\-]+',
+                contact_text,
+                re.IGNORECASE
+            )
+            contact_info['youtube'] = list(set(youtube_urls)) if youtube_urls else ['N/A']
+            
+            # ========== TWITTER PROFILE EXTRACTION ==========
+            twitter_urls = re.findall(
+                r'https?://(?:www\.)?twitter\.com/[\w\-]+',
+                contact_text,
+                re.IGNORECASE
+            )
+            contact_info['twitter_url'] = list(set(twitter_urls)) if twitter_urls else ['N/A']
+            
+            # ========== LINKEDIN PROFILE URL (Primary) ==========
+            if contact_info['linkedin_urls'][0] != 'N/A':
+                contact_info['linkedin_url'] = contact_info['linkedin_urls'][0]
+            else:
+                contact_info['linkedin_url'] = 'N/A'
+            
+            logger.debug(f"Parsed comprehensive contact info with {len(contact_info)} fields")
             return contact_info
             
         except Exception as e:
             logger.debug(f"Error parsing contact info: {e}")
-            return {'raw_text': contact_text} if contact_text else {}
+            return {'raw_text': contact_text, 'error': str(e)} if contact_text else {}
     
     def _calculate_completeness(self, profile_data: Dict) -> int:
         """Calculate profile completeness score (0-100%)"""

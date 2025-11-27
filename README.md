@@ -99,9 +99,6 @@ python main.py
 ├── logs/                     # Application logs
 │   └── scraper.log
 │
-├── ARCHIVE/                  # Old test files (reference only)
-│   └── ... (debug/test scripts)
-│
 └── linkedin_env/             # Python virtual environment
 ```
 
@@ -142,6 +139,7 @@ User Input (interactive menu)
 
 ## 📊 Data Extracted (Per Profile)
 
+### Basic Profile Info
 - Full name & headline
 - Current/past companies
 - Job titles & employment dates
@@ -149,8 +147,19 @@ User Input (interactive menu)
 - Skills (with endorsement counts)
 - Certifications & education
 - About/Summary section
-- Website & social links
 - Completeness score (0-100%)
+
+### Contact Information (Multi-Value Extraction)
+Extracts MULTIPLE values for each field type from LinkedIn contact overlay:
+- **Email addresses** - All extracted emails (array)
+- **Phone numbers** - All phone numbers (array)
+- **LinkedIn URLs** - Profile URLs (array)
+- **GitHub profiles** - GitHub links (array)
+- **Websites** - Personal/company websites (array, supports 20+ domain extensions)
+- **Social Media** - Twitter, Instagram, Facebook, YouTube (arrays)
+- **Messaging** - WhatsApp, Telegram, Skype handles (arrays)
+- **Birthday** - Extracted from contact modal (format: "Month Day")
+- Shows "N/A" for missing/unavailable fields
 
 ## 🗄️ Database
 
@@ -208,16 +217,39 @@ scraping:
 
 ## 📝 Output Example
 
-**profiles.json**:
+**profiles.json** (with contact info):
 ```json
 {
   "name": "John Doe",
   "headline": "Senior Software Engineer",
   "current_company": "Tech Corp",
   "skills": ["Python", "JavaScript", "React"],
+  "contact_info": {
+    "emails": ["john@example.com"],
+    "phones": ["+1-555-0123"],
+    "linkedin_urls": ["https://linkedin.com/in/johndoe"],
+    "websites": ["johndoe.dev", "github.com/johndoe"],
+    "github_urls": ["https://github.com/johndoe"],
+    "twitter": ["@johndoe"],
+    "instagram": ["johndoe"],
+    "facebook": ["N/A"],
+    "whatsapp": ["N/A"],
+    "telegram": ["N/A"],
+    "skype": ["N/A"],
+    "youtube": ["N/A"],
+    "twitter_url": ["@johndoe"],
+    "linkedin_url": "https://linkedin.com/in/johndoe",
+    "birthday": ["May 15"]
+  },
   "completeness": 85,
   "profile_url": "https://linkedin.com/in/johndoe"
 }
+```
+
+**profiles.csv** (contact fields flattened with pipe separator):
+```csv
+name,headline,current_company,contact_linkedin_url,contact_websites,contact_emails,contact_phones,contact_github_urls,...
+John Doe,Senior Software Engineer,Tech Corp,https://linkedin.com/in/johndoe,johndoe.dev | github.com/johndoe,john@example.com,+1-555-0123,https://github.com/johndoe,...
 ```
 
 ## 📦 Requirements
@@ -246,12 +278,30 @@ Install all: `pip install -r requirements.txt`
 
 ## ✅ Current Status
 
-- ✅ Core scraping functional
-- ✅ Anti-detection implemented
-- ✅ Database persistence working
-- ✅ Multi-format export operational
-- ✅ Resume capability active
-- ⚠️ LinkedIn actively blocking (use VPN/rotate accounts)
+### Implementation Complete
+- ✅ Core scraping engine functional
+- ✅ Multi-value contact extraction (15+ field types)
+- ✅ Contact info extraction from LinkedIn overlay modal
+- ✅ Anti-detection with 10+ layers implemented
+- ✅ Database persistence with resume capability
+- ✅ Multi-format export (JSON/CSV/Excel)
+- ✅ Data validation & completeness scoring
+- ✅ All unit tests passing
+- ✅ Real-world testing successful (profiles verified with contact info)
+
+### Technical Features
+- 🔄 Text-based extraction (resistant to HTML changes)
+- 🔄 Multi-agent architecture (Search, Scrape, Validate)
+- 🔄 Async/await pattern for performance
+- 🔄 Error handling & graceful degradation
+- 🔄 Configurable settings (settings.yaml)
+- 🔄 Comprehensive logging
+
+### Known Limitations
+- ⚠️ LinkedIn actively detecting/blocking automation (use VPN, rotate accounts)
+- ⚠️ Rate limiting required (2-5 profiles/minute)
+- ⚠️ Some profiles have restricted contact info (privacy settings)
+- ⚠️ Requires valid LinkedIn account credentials
 
 ---
 

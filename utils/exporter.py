@@ -130,6 +130,37 @@ class DataExporter:
         flat['profile_url'] = profile.get('profile_url', '')
         flat['about'] = profile.get('about', '')[:500] if profile.get('about') else ''
         
+        # Contact info fields - handle both single and multiple values
+        contact_info = profile.get('contact_info', {})
+        if contact_info:
+            # Helper function to join lists or get single value
+            def format_contact_field(val):
+                if isinstance(val, list):
+                    return ' | '.join([str(v) for v in val if v and v != 'N/A'])[:200] or 'N/A'
+                return str(val) if val else 'N/A'
+            
+            flat['contact_emails'] = format_contact_field(contact_info.get('emails', 'N/A'))
+            flat['contact_phones'] = format_contact_field(contact_info.get('phones', 'N/A'))
+            flat['contact_linkedin_urls'] = format_contact_field(contact_info.get('linkedin_urls', 'N/A'))
+            flat['contact_github_urls'] = format_contact_field(contact_info.get('github_urls', 'N/A'))
+            flat['contact_websites'] = format_contact_field(contact_info.get('websites', 'N/A'))
+            flat['contact_twitter'] = format_contact_field(contact_info.get('twitter', 'N/A'))
+            flat['contact_instagram'] = format_contact_field(contact_info.get('instagram', 'N/A'))
+            flat['contact_facebook'] = format_contact_field(contact_info.get('facebook', 'N/A'))
+            flat['contact_whatsapp'] = format_contact_field(contact_info.get('whatsapp', 'N/A'))
+            flat['contact_telegram'] = format_contact_field(contact_info.get('telegram', 'N/A'))
+            flat['contact_birthday'] = format_contact_field(contact_info.get('birthday', 'N/A'))
+            flat['contact_skype'] = format_contact_field(contact_info.get('skype', 'N/A'))
+            flat['contact_youtube'] = format_contact_field(contact_info.get('youtube', 'N/A'))
+            flat['contact_twitter_url'] = format_contact_field(contact_info.get('twitter_url', 'N/A'))
+            flat['contact_linkedin_url'] = format_contact_field(contact_info.get('linkedin_url', 'N/A'))
+        else:
+            # Initialize all contact fields as N/A if contact_info not available
+            contact_fields = ['emails', 'phones', 'linkedin_urls', 'github_urls', 'websites', 'twitter', 'instagram', 
+                            'facebook', 'whatsapp', 'telegram', 'birthday', 'skype', 'youtube', 'twitter_url', 'linkedin_url']
+            for field in contact_fields:
+                flat[f'contact_{field}'] = 'N/A'
+        
         # Experience summary
         experience = profile.get('experience', [])
         if experience:
