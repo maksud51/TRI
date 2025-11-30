@@ -32,6 +32,7 @@ from scraper.data_extractor import DataExtractor
 from agents.search_agent import SearchAgent
 from agents.scrape_agent import ScrapeAgent
 from agents.validation_agent import ValidationAgent
+from agents.connections_agent import ConnectionsAgent
 from database.db_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ class LinkedInScraperApp:
         self.search_agent: SearchAgent = None
         self.scrape_agent: ScrapeAgent = None
         self.validation_agent: ValidationAgent = None
+        self.connections_agent: ConnectionsAgent = None
         self.exporter: DataExporter = None
         self.start_time = None
     
@@ -73,6 +75,7 @@ class LinkedInScraperApp:
             self.search_agent = SearchAgent(self.browser_controller)
             self.scrape_agent = ScrapeAgent(self.browser_controller, self.data_extractor)
             self.validation_agent = ValidationAgent()
+            self.connections_agent = ConnectionsAgent(self.browser_controller)
             self.exporter = DataExporter(self.config.export['export_path'])
             
             logger.info("[OK] All components initialized successfully")
@@ -290,6 +293,64 @@ class LinkedInScraperApp:
         except Exception as e:
             logger.error(f"[X] Resume error: {e}")
     
+    async def workflow_scrape_connections(self, max_profiles: int = 50):
+        """Scrape profiles from user's connections"""
+        try:
+            logger.info(f"\n{'='*60}")
+            logger.info("SCRAPING CONNECTIONS PROFILES")
+            logger.info(f"{'='*60}\n")
+            
+            # Use connections agent to collect and scrape
+            result = await self.connections_agent.scrape_connection_profiles(
+                scrape_agent=self.scrape_agent,
+                db_manager=self.db,
+                max_profiles=max_profiles
+            )
+            
+            if not result.get('success'):
+                logger.warning("[X] Connections scraping failed or no profiles collected")
+                return
+            
+            # Get all profiles and validate
+            all_profiles = self.db.get_all_scraped_data()
+            
+            if all_profiles:
+                logger.info("\nValidating scraped data...")
+                validation_results = self.validation_agent.batch_validate(all_profiles)
+                
+                logger.info(f"[OK] Validation: {validation_results['valid']}/{validation_results['total']} valid")
+                logger.info(f"📊 Avg Completeness: {validation_results['avg_completeness']}%")
+                logger.info(f"📊 Avg Score: {validation_results['avg_score']}/100")
+                
+                # Export data
+                logger.info(f"\n{'='*60}")
+                logger.info("EXPORTING DATA")
+                logger.info(f"{'='*60}\n")
+                
+                export_results = self.exporter.export_all_formats(all_profiles)
+                
+                for format_name, success in export_results.items():
+                    if success:
+                        logger.info(f"[OK] Exported to {format_name.upper()}")
+            
+            # Final statistics
+            final_stats = self.db.get_scraping_stats()
+            logger.info(f"\n{'='*60}")
+            logger.info("FINAL STATISTICS")
+            logger.info(f"{'='*60}")
+            logger.info(f"Total Profiles: {final_stats['total']}")
+            logger.info(f"Completed: {final_stats['completed']}")
+            logger.info(f"Failed: {final_stats['failed']}")
+            logger.info(f"Pending: {final_stats['pending']}")
+            logger.info(f"Success Rate: {final_stats['success_rate']}")
+            logger.info(f"Avg Completeness: {final_stats['avg_completeness']}")
+            logger.info(f"Database Size: {self.db.get_db_size()}")
+            logger.info(f"Export Path: {self.exporter.get_export_path()}")
+            logger.info(f"{'='*60}\n")
+            
+        except Exception as e:
+            logger.error(f"[X] Connections scraping error: {e}")
+    
     async def workflow_export(self):
         """Export existing data"""
         try:
@@ -324,17 +385,18 @@ class LinkedInScraperApp:
         print("[MENU] SELECT MODE")
         print("="*60)
         print("1. Search & Scrape New Profiles")
-        print("2. Resume Previous Scraping")
-        print("3. Export Existing Data")
-        print("4. View Statistics")
-        print("5. Cleanup Old Data")
+        print("2. Scrape My Connections")
+        print("3. Resume Previous Scraping")
+        print("4. Export Existing Data")
+        print("5. View Statistics")
+        print("6. Cleanup Old Data")
         print("0. Exit")
         print("="*60)
         
         while True:
             try:
-                choice = input("\nEnter your choice (0-5): ").strip()
-                if choice in ['0', '1', '2', '3', '4', '5']:
+                choice = input("\nEnter your choice (0-6): ").strip()
+                if choice in ['0', '1', '2', '3', '4', '5', '6']:
                     return int(choice)
                 print("[X] Invalid choice. Please try again.")
             except KeyboardInterrupt:
@@ -403,19 +465,24 @@ class LinkedInScraperApp:
                         await self.workflow_search_and_scrape(queries, max_profiles)
                 
                 elif choice == 2:
+                    # Scrape Connections
+                    max_profiles = int(input("Max connection profiles to scrape (default 50): ") or "50")
+                    await self.workflow_scrape_connections(max_profiles)
+                
+                elif choice == 3:
                     # Resume
                     limit = int(input("How many profiles to resume (default 100): ") or "100")
                     await self.workflow_resume(limit)
                 
-                elif choice == 3:
+                elif choice == 4:
                     # Export
                     await self.workflow_export()
                 
-                elif choice == 4:
+                elif choice == 5:
                     # Statistics
                     await self.show_statistics()
                 
-                elif choice == 5:
+                elif choice == 6:
                     # Cleanup
                     await self.cleanup_data()
             
